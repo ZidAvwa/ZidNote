@@ -1,0 +1,52 @@
+import 'package:flutter/material.dart';
+
+/// Text style of one character: color, font, size, bold.
+class TS {
+  final int color;
+  final String font;
+  final double size;
+  final bool bold;
+  const TS(this.color, this.font, this.size, this.bold);
+
+  static const def = TS(0xFF000000, 'Roboto', 18, false);
+
+  TS copy({int? color, String? font, double? size, bool? bold}) =>
+      TS(color ?? this.color, font ?? this.font, size ?? this.size, bold ?? this.bold);
+
+  @override
+  bool operator ==(Object o) =>
+      o is TS && o.color == color && o.font == font && o.size == size && o.bold == bold;
+  @override
+  int get hashCode => Object.hash(color, font, size, bold);
+
+  TextStyle get style => TextStyle(
+      color: Color(color),
+      fontFamily: font,
+      fontSize: size,
+      fontWeight: bold ? FontWeight.bold : FontWeight.normal);
+
+  String get hex => (color & 0xFFFFFF).toRadixString(16).padLeft(6, '0').toUpperCase();
+}
+
+/// A piece of text sharing one style.
+class Run {
+  final String t;
+  final TS s;
+  Run(this.t, this.s);
+
+  Map toJson() => {'t': t, 'c': s.color, 'f': s.font, 's': s.size, 'b': s.bold};
+  factory Run.fromJson(Map j) =>
+      Run(j['t'], TS(j['c'], j['f'], (j['s'] as num).toDouble(), j['b']));
+}
+
+class Note {
+  String id, title;
+  List<Run> runs;
+  Note(this.id, this.title, this.runs);
+
+  String get plain => runs.map((r) => r.t).join();
+
+  Map toJson() => {'id': id, 'title': title, 'runs': runs.map((r) => r.toJson()).toList()};
+  factory Note.fromJson(Map j) => Note(
+      j['id'], j['title'], (j['runs'] as List).map((r) => Run.fromJson(r)).toList());
+}

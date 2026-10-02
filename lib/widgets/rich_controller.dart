@@ -6,9 +6,10 @@ class RichCtl extends TextEditingController {
   List<TS> chars = [];
   TS pen = TS.def; // style for newly typed text when nothing is selected
   String _old = '';
+  int _off = -1;
 
   RichCtl() {
-    addListener(_sync);
+    addListener(_onChange);
   }
 
   void load(List<Run> runs) {
@@ -17,10 +18,24 @@ class RichCtl extends TextEditingController {
     value = TextEditingValue(text: _old);
   }
 
+  void _onChange() {
+    if (text != _old) {
+      _sync();
+      _off = selection.baseOffset;
+      return;
+    }
+    // Cursor moved: typing continues with the style of the character before it.
+    final s = selection;
+    if (s.isCollapsed && s.baseOffset >= 0 && s.baseOffset != _off) {
+      _off = s.baseOffset;
+      final i = s.baseOffset > 0 ? s.baseOffset - 1 : 0;
+      if (i < chars.length) pen = chars[i];
+    }
+  }
+
   // Keeps `chars` aligned with the text after every edit (insert/delete/paste).
   void _sync() {
     final n = text;
-    if (n == _old) return;
     int p = 0;
     while (p < _old.length && p < n.length && _old[p] == n[p]) {
       p++;
@@ -34,6 +49,13 @@ class RichCtl extends TextEditingController {
     chars.removeRange(p, _old.length - s);
     chars.insertAll(p, List.filled(n.length - s - p, pen));
     _old = n;
+  }
+
+  /// Style shown in the selectors: of the selection, or of the typing pen.
+  TS get current {
+    final s = selection;
+    if (s.isValid && !s.isCollapsed && s.start < chars.length) return chars[s.start];
+    return pen;
   }
 
   /// Applies [f] to the selected text, or to the typing style if nothing is selected.

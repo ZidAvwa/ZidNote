@@ -24,12 +24,34 @@ void saveNote(Note n) {
 
 void deleteNote(String id) => _writeNotes(loadNotes()..removeWhere((x) => x.id == id));
 
-// ---- Color palette (persists after the app is closed) ----
+// ---- Groups (folders) ----
 
-List<int> loadPalette() =>
-    (_prefs.getStringList('palette') ?? ['4278190080', '4294198070', '4280391411', '4283215696'])
-        .map(int.parse)
-        .toList();
+List<String> loadGroups() => _prefs.getStringList('groups') ?? [];
+void saveGroups(List<String> g) => _prefs.setStringList('groups', g);
 
-void savePalette(List<int> p) =>
-    _prefs.setStringList('palette', p.map((e) => e.toString()).toList());
+// ---- Color palette presets (persist after the app is closed) ----
+
+Map<String, List<int>> loadPresets() {
+  final raw = _prefs.getString('presets');
+  if (raw != null) {
+    return (jsonDecode(raw) as Map)
+        .map((k, v) => MapEntry(k as String, (v as List).cast<int>()));
+  }
+  final old = _prefs.getStringList('palette'); // from version 1.0
+  return {
+    'Basic': [
+      0xFF000000, 0xFFF44336, 0xFF2196F3, 0xFF4CAF50,
+      0xFFFF9800, 0xFF9C27B0, 0xFF795548, 0xFF9E9E9E,
+    ],
+    'Pastel': [
+      0xFFFFADAD, 0xFFFFD6A5, 0xFFFDFFB6, 0xFFCAFFBF,
+      0xFF9BF6FF, 0xFFA0C4FF, 0xFFBDB2FF, 0xFFFFC6FF,
+    ],
+    if (old != null) 'My colors': old.map(int.parse).toList(),
+  };
+}
+
+void savePresets(Map<String, List<int>> p) => _prefs.setString('presets', jsonEncode(p));
+
+String loadActivePreset() => _prefs.getString('activePreset') ?? 'Basic';
+void saveActivePreset(String n) => _prefs.setString('activePreset', n);

@@ -40,13 +40,18 @@ class Run {
 }
 
 class Note {
-  String id, title;
+  String id, title, group; // group '' = no group
   List<Run> runs;
-  Note(this.id, this.title, this.runs);
+  Note(this.id, this.title, this.runs, [this.group = '']);
 
   String get plain => runs.map((r) => r.t).join();
 
-  Map toJson() => {'id': id, 'title': title, 'runs': runs.map((r) => r.toJson()).toList()};
-  factory Note.fromJson(Map j) => Note(
-      j['id'], j['title'], (j['runs'] as List).map((r) => Run.fromJson(r)).toList());
+  Map toJson() => {
+        'id': id,
+        'title': title,
+        'group': group,
+        'runs': runs.map((r) => r.toJson()).toList()
+      };
+  factory Note.fromJson(Map j) => Note(j['id'], j['title'],
+      (j['runs'] as List).map((r) => Run.fromJson(r)).toList(), j['group'] ?? '');
 }

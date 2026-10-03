@@ -9,7 +9,6 @@ import '../widgets/dialogs.dart';
 import 'editor_page.dart';
 
 const _all = '__all__';
-const _newGroup = '__new__';
 
 class NotesPage extends StatefulWidget {
   const NotesPage({super.key});
@@ -37,19 +36,14 @@ class _NotesPageState extends State<NotesPage> {
     refresh();
   }
 
-  Future<void> onFilter(String? v) async {
-    if (v == null) return;
-    if (v == _newGroup) {
-      final name = await askText(context, 'New group name');
-      if (name == null || name.isEmpty) return;
-      if (!groups.contains(name)) {
-        groups.add(name);
-        saveGroups(groups);
-      }
-      setState(() => filter = name);
-    } else {
-      setState(() => filter = v);
+  Future<void> addGroup() async {
+    final name = await askText(context, 'New group name');
+    if (name == null || name.isEmpty || name == _all) return;
+    if (!groups.contains(name)) {
+      groups.add(name);
+      saveGroups(groups);
     }
+    setState(() => filter = name);
   }
 
   Future<void> renameGroup() async {
@@ -99,71 +93,103 @@ class _NotesPageState extends State<NotesPage> {
     }
   }
 
+  /// One browser-style tab.
+  Widget tab(String label, String value) {
+    final selected = filter == value;
+    return GestureDetector(
+      onTap: () => setState(() => filter = value),
+      child: Container(
+        margin: const EdgeInsets.only(right: 3),
+        padding: const EdgeInsets.symmetric(horizontal: 16),
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: selected ? Theme.of(context).scaffoldBackgroundColor : Colors.black12,
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(12)),
+        ),
+        child: Text(label,
+            style: TextStyle(fontWeight: selected ? FontWeight.bold : FontWeight.normal)),
+      ),
+    );
+  }
+
   @override
-  Widget build(BuildContext context) => Scaffold(
-        appBar: AppBar(
-          title: DropdownButton<String>(
-            value: filter,
-            underline: const SizedBox(),
-            items: [
-              const DropdownMenuItem(value: _all, child: Text('All notes')),
-              const DropdownMenuItem(value: '', child: Text('No group')),
-              for (final g in groups) DropdownMenuItem(value: g, child: Text(g)),
-              const DropdownMenuItem(value: _newGroup, child: Text('＋ New group…')),
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('My Notes'),
+        backgroundColor: cs.primaryContainer,
+        foregroundColor: cs.onPrimaryContainer,
+        actions: [
+          PopupMenuButton<String>(
+            onSelected: (v) {
+              if (v == 'import') importNote();
+              if (v == 'rename') renameGroup();
+              if (v == 'delete') deleteGroup();
+            },
+            itemBuilder: (_) => [
+              const PopupMenuItem(value: 'import', child: Text('Import note (.docx / .txt)')),
+              if (realGroup) const PopupMenuItem(value: 'rename', child: Text('Rename group')),
+              if (realGroup) const PopupMenuItem(value: 'delete', child: Text('Delete group')),
             ],
-            onChanged: onFilter,
-          ),
-          actions: [
-            PopupMenuButton<String>(
-              onSelected: (v) {
-                if (v == 'import') importNote();
-                if (v == 'rename') renameGroup();
-                if (v == 'delete') deleteGroup();
-              },
-              itemBuilder: (_) => [
-                const PopupMenuItem(value: 'import', child: Text('Import note (.docx / .txt)')),
-                if (realGroup) const PopupMenuItem(value: 'rename', child: Text('Rename group')),
-                if (realGroup) const PopupMenuItem(value: 'delete', child: Text('Delete group')),
-              ],
-            )
-          ],
-        ),
-        floatingActionButton: FloatingActionButton(
-            onPressed: () => open(Note(newId(), '', [], filter == _all ? '' : filter)),
-            child: const Icon(Icons.edit)),
-        body: GridView.count(
-          crossAxisCount: 2,
-          padding: const EdgeInsets.all(8),
-          children: [
-            for (final n in shown)
-              Card(
-                child: InkWell(
-                  onTap: () => open(n),
-                  onLongPress: () async {
-                    if (await confirm(context, 'Delete "${n.title.isEmpty ? 'Untitled' : n.title}"?')) {
-                      deleteNote(n.id);
-                      refresh();
-                    }
-                  },
-                  child: Padding(
-                    padding: const EdgeInsets.all(12),
-                    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                      Text(n.title.isEmpty ? 'Untitled' : n.title,
-                          style: const TextStyle(fontWeight: FontWeight.bold)),
-                      if (filter == _all && n.group.isNotEmpty)
-                        Text(n.group, style: const TextStyle(fontSize: 11, color: Colors.grey)),
-                      const SizedBox(height: 6),
-                      Expanded(
-                          child: Text.rich(
-                              TextSpan(children: [
-                                for (final r in n.runs) TextSpan(text: r.t, style: r.s.style)
-                              ]),
-                              overflow: TextOverflow.fade)),
-                    ]),
-                  ),
+          )
+        ],
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(44),
+          child: SizedBox(
+            height: 44,
+            child: ListView(
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.only(left: 8, top: 4),
+              children: [
+                tab('All', _all),
+                tab('No group', ''),
+                for (final g in groups) tab(g, g),
+                GestureDetector(
+                  onTap: addGroup,
+                  child: const Padding(
+                      padding: EdgeInsets.symmetric(horizontal: 10), child: Icon(Icons.add)),
                 ),
-              )
-          ],
+              ],
+            ),
+          ),
         ),
-      );
+      ),
+      floatingActionButton: FloatingActionButton(
+          onPressed: () => open(Note(newId(), '', [], filter == _all ? '' : filter)),
+          child: const Icon(Icons.edit)),
+      body: GridView.count(
+        crossAxisCount: 2,
+        padding: const EdgeInsets.all(8),
+        children: [
+          for (final n in shown)
+            Card(
+              child: InkWell(
+                onTap: () => open(n),
+                onLongPress: () async {
+                  if (await confirm(context, 'Delete "${n.title.isEmpty ? 'Untitled' : n.title}"?')) {
+                    deleteNote(n.id);
+                    refresh();
+                  }
+                },
+                child: Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Text(n.title.isEmpty ? 'Untitled' : n.title,
+                        style: const TextStyle(fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 6),
+                    Expanded(
+                        child: Text.rich(
+                            TextSpan(children: [
+                              for (final r in n.runs) TextSpan(text: r.t, style: r.s.style)
+                            ]),
+                            overflow: TextOverflow.fade)),
+                  ]),
+                ),
+              ),
+            )
+        ],
+      ),
+    );
+  }
 }

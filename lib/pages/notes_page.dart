@@ -2,11 +2,13 @@ import 'dart:convert';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import '../models/note.dart';
+import '../services/backup.dart';
 import '../services/exporters.dart';
 import '../services/importers.dart';
 import '../services/storage.dart';
 import '../widgets/dialogs.dart';
 import 'editor_page.dart';
+import 'trash_page.dart';
 
 const _all = '__all__';
 
@@ -25,9 +27,17 @@ class _NotesPageState extends State<NotesPage> {
   final pc = PageController();
   final keys = <String, GlobalKey>{}; // to scroll the tab strip to the selected tab
 
+  bool searching = false;
+  String query = '';
+  final searchCtl = TextEditingController();
+
   List<String> get tabs => [_all, '', ...groups];
   bool get realGroup => filter != _all && filter != '';
   String newId() => DateTime.now().millisecondsSinceEpoch.toString();
+
+  void snack(String m) {
+    if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(m)));
+  }
 
   void refresh() => setState(() {
         notes = loadNotes();
@@ -70,6 +80,11 @@ class _NotesPageState extends State<NotesPage> {
     refresh();
   }
 
+  Future<void> openTrash() async {
+    await Navigator.push(context, MaterialPageRoute(builder: (_) => const TrashPage()));
+    refresh();
+  }
+
   // ---- sorting: pinned notes always first ----
 
   List<Note> sorted(List<Note> l) => l
@@ -86,6 +101,29 @@ class _NotesPageState extends State<NotesPage> {
           return b.modified.compareTo(a.modified);
       }
     });
+
+  // ---- search ----
+
+  void closeSearch() => setState(() {
+        searching = false;
+        query = '';
+        searchCtl.clear();
+      });
+
+  Widget results() {
+    final q = query.toLowerCase();
+    if (q.isEmpty) {
+      return const Center(child: Text('Type to search all notes', style: TextStyle(color: Colors.grey)));
+    }
+    final list = sorted(notes
+        .where((n) => n.title.toLowerCase().contains(q) || n.plain.toLowerCase().contains(q))
+        .toList());
+    if (list.isEmpty) {
+      return const Center(child: Text('No matches', style: TextStyle(color: Colors.grey)));
+    }
+    return GridView.count(
+        crossAxisCount: 2, padding: const EdgeInsets.all(8), children: [for (final n in list) card(n)]);
+  }
 
   // ---- groups ----
 
@@ -157,11 +195,79 @@ class _NotesPageState extends State<NotesPage> {
       saveNote(Note(newId(), title, runs, realGroup ? filter : ''));
       refresh();
     } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('Could not import: $e')));
+      snack('Could not import: $e');
     }
   }
+
+  // ---- backup & restore ----
+
+  Future<void> backup({required bool toDevice}) async {
+    final bytes = utf8.encode(makeBackup());
+    final d = DateTime.now();
+    final name = 'colornote-backup-${d.year}'
+        '${d.month.toString().padLeft(2, '0')}${d.day.toString().padLeft(2, '0')}.json';
+    try {
+      if (toDevice) {
+        final p = await saveToDevice(name, bytes);
+        if (p != null) snack('Saved $name');
+      } else {
+        await shareFile(name, bytes, 'application/json');
+      }
+    } catch (e) {
+      snack('Backup failed: $e');
+    }
+  }
+
+  Future<void> restore() async {
+    try {
+      final r = await FilePicker.platform.pickFiles(type: FileType.any, withData: true);
+      final f = r?.files.single;
+      if (f == null || f.bytes == null) return;
+      final n = restoreBackup(utf8.decode(f.bytes!));
+      refresh();
+      snack('Restored $n note${n == 1 ? '' : 's'}');
+    } catch (e) {
+      snack('Could not restore: $e');
+    }
+  }
+
+  void backupSheet() => showModalBottomSheet(
+        context: context,
+        builder: (s) => SafeArea(
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            ListTile(
+              leading: const Icon(Icons.backup_outlined),
+              title: const Text('Back up all notes'),
+              subtitle: Text('${notes.length} notes, groups and palettes'),
+              trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                IconButton(
+                    tooltip: 'Save to device',
+                    icon: const Icon(Icons.save_alt),
+                    onPressed: () {
+                      Navigator.pop(s);
+                      backup(toDevice: true);
+                    }),
+                IconButton(
+                    tooltip: 'Share',
+                    icon: const Icon(Icons.share),
+                    onPressed: () {
+                      Navigator.pop(s);
+                      backup(toDevice: false);
+                    }),
+              ]),
+            ),
+            ListTile(
+              leading: const Icon(Icons.restore),
+              title: const Text('Restore from backup file'),
+              subtitle: const Text('Adds missing notes; nothing is deleted'),
+              onTap: () {
+                Navigator.pop(s);
+                restore();
+              },
+            ),
+          ]),
+        ),
+      );
 
   // ---- note actions (long press) ----
 
@@ -176,7 +282,7 @@ class _NotesPageState extends State<NotesPage> {
               onTap: () => Navigator.pop(s, 'pin')),
           ListTile(
               leading: const Icon(Icons.delete_outline),
-              title: const Text('Delete'),
+              title: const Text('Move to trash'),
               onTap: () => Navigator.pop(s, 'delete')),
         ]),
       ),
@@ -186,11 +292,18 @@ class _NotesPageState extends State<NotesPage> {
       saveNote(n);
       refresh();
     } else if (v == 'delete') {
+      trashNote(n.id);
+      refresh();
       if (!mounted) return;
-      if (await confirm(context, 'Delete "${n.title.isEmpty ? 'Untitled' : n.title}"?')) {
-        deleteNote(n.id);
-        refresh();
-      }
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: const Text('Moved to trash'),
+        action: SnackBarAction(
+            label: 'Undo',
+            onPressed: () {
+              restoreNote(n.id);
+              refresh();
+            }),
+      ));
     }
   }
 
@@ -266,76 +379,114 @@ class _NotesPageState extends State<NotesPage> {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('My Notes'),
-        backgroundColor: cs.primaryContainer,
-        foregroundColor: cs.onPrimaryContainer,
-        actions: [
-          PopupMenuButton<String>(
-            tooltip: 'Sort',
-            icon: const Icon(Icons.sort),
-            onSelected: (v) {
-              saveSort(v);
-              setState(() => sort = v);
-            },
-            itemBuilder: (_) => [
-              CheckedPopupMenuItem(
-                  value: 'modified', checked: sort == 'modified', child: const Text('Date modified')),
-              CheckedPopupMenuItem(
-                  value: 'created', checked: sort == 'created', child: const Text('Date created')),
-              CheckedPopupMenuItem(value: 'az', checked: sort == 'az', child: const Text('Title A–Z')),
-              CheckedPopupMenuItem(value: 'za', checked: sort == 'za', child: const Text('Title Z–A')),
-            ],
-          ),
-          PopupMenuButton<String>(
-            onSelected: (v) {
-              if (v == 'import') importNote();
-              if (v == 'rename') renameGroup();
-              if (v == 'color') changeGroupColor();
-              if (v == 'delete') deleteGroup();
-            },
-            itemBuilder: (_) => [
-              const PopupMenuItem(value: 'import', child: Text('Import note (.docx / .txt)')),
-              if (realGroup) const PopupMenuItem(value: 'rename', child: Text('Rename group')),
-              if (realGroup) const PopupMenuItem(value: 'color', child: Text('Group color')),
-              if (realGroup) const PopupMenuItem(value: 'delete', child: Text('Delete group')),
-            ],
-          )
-        ],
-        bottom: PreferredSize(
-          preferredSize: const Size.fromHeight(44),
-          child: SizedBox(
-            height: 44,
-            child: ListView(
-              scrollDirection: Axis.horizontal,
-              padding: const EdgeInsets.only(left: 8, top: 4),
-              children: [
-                tab('All', _all),
-                tab('No group', ''),
-                for (final g in groups) tab(g, g),
-                GestureDetector(
-                  onTap: addGroup,
-                  child: const Padding(
-                      padding: EdgeInsets.symmetric(horizontal: 10), child: Icon(Icons.add)),
+    return PopScope(
+      canPop: !searching,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) closeSearch();
+      },
+      child: Scaffold(
+        appBar: AppBar(
+          title: searching
+              ? TextField(
+                  controller: searchCtl,
+                  autofocus: true,
+                  decoration: const InputDecoration(hintText: 'Search notes', border: InputBorder.none),
+                  onChanged: (v) => setState(() => query = v.trim()),
+                )
+              : const Text('My Notes'),
+          backgroundColor: cs.primaryContainer,
+          foregroundColor: cs.onPrimaryContainer,
+          actions: searching
+              ? [IconButton(tooltip: 'Close search', icon: const Icon(Icons.close), onPressed: closeSearch)]
+              : [
+                  IconButton(
+                      tooltip: 'Search',
+                      icon: const Icon(Icons.search),
+                      onPressed: () => setState(() => searching = true)),
+                  PopupMenuButton<String>(
+                    tooltip: 'Sort',
+                    icon: const Icon(Icons.sort),
+                    onSelected: (v) {
+                      saveSort(v);
+                      setState(() => sort = v);
+                    },
+                    itemBuilder: (_) => [
+                      CheckedPopupMenuItem(
+                          value: 'modified',
+                          checked: sort == 'modified',
+                          child: const Text('Date modified')),
+                      CheckedPopupMenuItem(
+                          value: 'created',
+                          checked: sort == 'created',
+                          child: const Text('Date created')),
+                      CheckedPopupMenuItem(
+                          value: 'az', checked: sort == 'az', child: const Text('Title A–Z')),
+                      CheckedPopupMenuItem(
+                          value: 'za', checked: sort == 'za', child: const Text('Title Z–A')),
+                    ],
+                  ),
+                  PopupMenuButton<String>(
+                    onSelected: (v) {
+                      if (v == 'import') importNote();
+                      if (v == 'backup') backupSheet();
+                      if (v == 'trash') openTrash();
+                      if (v == 'rename') renameGroup();
+                      if (v == 'color') changeGroupColor();
+                      if (v == 'delete') deleteGroup();
+                    },
+                    itemBuilder: (_) => [
+                      const PopupMenuItem(value: 'import', child: Text('Import note (.docx / .txt)')),
+                      const PopupMenuItem(value: 'backup', child: Text('Backup & restore')),
+                      const PopupMenuItem(value: 'trash', child: Text('Trash')),
+                      if (realGroup) const PopupMenuItem(value: 'rename', child: Text('Rename group')),
+                      if (realGroup) const PopupMenuItem(value: 'color', child: Text('Group color')),
+                      if (realGroup) const PopupMenuItem(value: 'delete', child: Text('Delete group')),
+                    ],
+                  ),
+                ],
+          bottom: searching
+              ? null
+              : PreferredSize(
+                  preferredSize: const Size.fromHeight(44),
+                  child: SizedBox(
+                    height: 44,
+                    child: ListView(
+                      scrollDirection: Axis.horizontal,
+                      padding: const EdgeInsets.only(left: 8, top: 4),
+                      children: [
+                        tab('All', _all),
+                        tab('No group', ''),
+                        for (final g in groups) tab(g, g),
+                        GestureDetector(
+                          onTap: addGroup,
+                          child: const Padding(
+                              padding: EdgeInsets.symmetric(horizontal: 10),
+                              child: Icon(Icons.add)),
+                        ),
+                      ],
+                    ),
+                  ),
                 ),
-              ],
-            ),
-          ),
         ),
-      ),
-      floatingActionButton: FloatingActionButton(
-          onPressed: () => open(Note(newId(), '', [], realGroup ? filter : '')),
-          child: const Icon(Icons.edit)),
-      // Swipe left/right on the list to move to the next/previous group tab.
-      body: PageView.builder(
-        controller: pc,
-        itemCount: tabs.length,
-        onPageChanged: (i) {
-          setState(() => filter = tabs[i]);
-          reveal(tabs[i]);
-        },
-        itemBuilder: (_, i) => page(tabs[i]),
+        floatingActionButton: FloatingActionButton(
+            onPressed: () => open(Note(newId(), '', [], realGroup ? filter : '')),
+            child: const Icon(Icons.edit)),
+        // Swipe left/right on the list to move to the next/previous group tab.
+        body: Stack(fit: StackFit.expand, children: [
+          PageView.builder(
+            controller: pc,
+            itemCount: tabs.length,
+            onPageChanged: (i) {
+              setState(() => filter = tabs[i]);
+              reveal(tabs[i]);
+            },
+            itemBuilder: (_, i) => page(tabs[i]),
+          ),
+          if (searching)
+            Positioned.fill(
+              child: ColoredBox(color: Theme.of(context).scaffoldBackgroundColor, child: results()),
+            ),
+        ]),
       ),
     );
   }

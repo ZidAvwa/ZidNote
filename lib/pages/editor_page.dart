@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 import 'package:flutter/material.dart';
@@ -19,8 +20,10 @@ class EditorPage extends StatefulWidget {
   State<EditorPage> createState() => _EditorPageState();
 }
 
-class _EditorPageState extends State<EditorPage> {
+class _EditorPageState extends State<EditorPage> with WidgetsBindingObserver {
   final ctl = RichCtl();
+  Timer? _timer; // autosave
+  bool _gone = false; // note was moved to trash, do not save again
   late final title = TextEditingController(text: widget.note.title);
   late Map<String, List<int>> presets;
   late String active;
@@ -52,21 +55,46 @@ class _EditorPageState extends State<EditorPage> {
     gcolors = loadGroupColors();
     if (!groups.contains(widget.note.group)) widget.note.group = '';
     ctl.load(widget.note.runs);
+    _snap = jsonEncode(widget.note.toJson());
+    WidgetsBinding.instance.addObserver(this);
+    title.addListener(_schedule);
     ctl.addListener(() {
       if (mounted) setState(() {}); // keeps the toolbar in sync with the cursor
+      _schedule();
     });
-    _snap = jsonEncode(widget.note.toJson());
   }
 
+  /// Saves only when something changed (so empty new notes are never created).
   void save() {
+    if (_gone) return;
     final n = widget.note;
     n.title = title.text;
     n.runs = ctl.runs();
-    if (jsonEncode(n.toJson()) != _snap) {
-      n.modified = DateTime.now().millisecondsSinceEpoch; // only when something changed
-    }
+    if (jsonEncode(n.toJson()) == _snap) return;
+    n.modified = DateTime.now().millisecondsSinceEpoch;
     saveNote(n);
     _snap = jsonEncode(n.toJson());
+  }
+
+  // ---- autosave: 1 s after you stop typing, and when the app goes to background ----
+
+  void _schedule() {
+    _timer?.cancel();
+    _timer = Timer(const Duration(seconds: 1), save);
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed) save();
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
+    ctl.dispose();
+    title.dispose();
+    super.dispose();
   }
 
   // ---- color ----
@@ -206,7 +234,13 @@ class _EditorPageState extends State<EditorPage> {
         // .sdocx is Samsung's private format; share sheet -> Samsung Notes imports text.
         Share.share('${title.text}\n\n${ctl.text}');
       case 'parse':
-        setState(() => ctl.load(fromColorTxt(ctl.text)));
+        ctl.replaceRuns(fromColorTxt(ctl.text));
+      case 'trash':
+        n.deletedAt = DateTime.now().millisecondsSinceEpoch;
+        n.pinned = false;
+        save();
+        _gone = true;
+        Navigator.pop(context);
     }
   }
 
@@ -359,6 +393,14 @@ class _EditorPageState extends State<EditorPage> {
         child: SizedBox(
           height: 52,
           child: Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [
+            IconButton(
+                tooltip: 'Undo',
+                icon: const Icon(Icons.undo),
+                onPressed: ctl.canUndo ? ctl.undo : null),
+            IconButton(
+                tooltip: 'Redo',
+                icon: const Icon(Icons.redo),
+                onPressed: ctl.canRedo ? ctl.redo : null),
             PopupMenuButton<String>(
               tooltip: 'Font',
               icon: const Icon(Icons.font_download_outlined),
@@ -448,6 +490,7 @@ class _EditorPageState extends State<EditorPage> {
                 PopupMenuItem(value: 'pin', child: Text(n.pinned ? 'Unpin' : 'Pin to top')),
                 const PopupMenuItem(value: 'samsung', child: Text('Send to Samsung Notes')),
                 const PopupMenuItem(value: 'parse', child: Text('Parse <#color> tags in text')),
+                const PopupMenuItem(value: 'trash', child: Text('Move to trash')),
               ],
             ),
           ],

@@ -1,28 +1,122 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../models/note.dart';
 
-/// TextEditingController that keeps one style per character.
+/// A saved state for undo/redo: text + per-character styles + cursor.
+class _Snap {
+  final String text;
+  final List<TS> chars;
+  final TextSelection sel;
+  _Snap(this.text, this.chars, this.sel);
+}
+
+/// TextEditingController that keeps one style per character, with undo/redo.
 class RichCtl extends TextEditingController {
   List<TS> chars = [];
   TS pen = TS.def; // style for newly typed text when nothing is selected
   String _old = '';
   int _off = -1;
 
+  // ---- undo / redo ----
+  static const _maxUndo = 100;
+  final List<_Snap> _undo = [], _redo = [];
+  late _Snap _base; // state before the current group of typing
+  bool _grouping = false;
+  Timer? _timer;
+
   static final _prefixRe = RegExp(r'^(?:• |\d+\. |[☐☑] )');
 
   RichCtl() {
+    _base = _snap();
     addListener(_onChange);
   }
 
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  _Snap _snap() => _Snap(text, List.of(chars), selection);
+
+  /// Loads a note (clears the undo history).
   void load(List<Run> runs) {
     chars = [for (final r in runs) ...List.filled(r.t.length, r.s)];
     _old = runs.map((r) => r.t).join();
     value = TextEditingValue(text: _old);
+    _timer?.cancel();
+    _grouping = false;
+    _undo.clear();
+    _redo.clear();
+    _base = _snap();
   }
+
+  bool get canUndo => _undo.isNotEmpty;
+  bool get canRedo => _redo.isNotEmpty;
+
+  /// Typing is grouped: edits within 700 ms become one undo step.
+  void _touch() {
+    if (!_grouping) {
+      _undo.add(_base);
+      _redo.clear();
+      if (_undo.length > _maxUndo) _undo.removeAt(0);
+      _grouping = true;
+    }
+    _timer?.cancel();
+    _timer = Timer(const Duration(milliseconds: 700), () {
+      _grouping = false;
+      _base = _snap();
+    });
+  }
+
+  /// Style / list changes are always their own undo step.
+  void _discrete(void Function() op) {
+    _timer?.cancel();
+    _grouping = false;
+    _base = _snap();
+    _undo.add(_base);
+    _redo.clear();
+    if (_undo.length > _maxUndo) _undo.removeAt(0);
+    op();
+    _base = _snap();
+  }
+
+  void _closeGroup() {
+    _timer?.cancel();
+    if (_grouping) {
+      _grouping = false;
+      _base = _snap();
+    }
+  }
+
+  void _restore(_Snap s) {
+    chars = List.of(s.chars);
+    _old = s.text; // set first so the listener does not record this as an edit
+    _off = s.sel.baseOffset;
+    _base = s;
+    value = TextEditingValue(text: s.text, selection: s.sel);
+  }
+
+  void undo() {
+    if (_undo.isEmpty) return;
+    _closeGroup();
+    _redo.add(_snap());
+    _restore(_undo.removeLast());
+  }
+
+  void redo() {
+    if (_redo.isEmpty) return;
+    _closeGroup();
+    _undo.add(_snap());
+    _restore(_redo.removeLast());
+  }
+
+  // ---- editing ----
 
   void _onChange() {
     if (text != _old) {
+      _touch();
       _sync();
       _off = selection.baseOffset;
       return;
@@ -67,12 +161,21 @@ class RichCtl extends TextEditingController {
     if (sel.isCollapsed) {
       pen = f(pen);
     } else {
-      for (int i = sel.start; i < sel.end && i < chars.length; i++) {
-        chars[i] = f(chars[i]);
-      }
+      _discrete(() {
+        for (int i = sel.start; i < sel.end && i < chars.length; i++) {
+          chars[i] = f(chars[i]);
+        }
+      });
     }
     notifyListeners();
   }
+
+  /// Replaces the whole content (undoable).
+  void replaceRuns(List<Run> runs) => _discrete(() {
+        chars = [for (final r in runs) ...List.filled(r.t.length, r.s)];
+        _old = runs.map((r) => r.t).join();
+        value = TextEditingValue(text: _old);
+      });
 
   /// Lists: kind is 'none', 'bullet', 'number' or 'check'.
   /// Works on every line touched by the selection; the markers are plain text,
@@ -116,8 +219,7 @@ class RichCtl extends TextEditingController {
     }
 
     final newT = t.replaceRange(a, e, nt.toString());
-    chars.replaceRange(a, e, nc);
-    _old = newT;
+    if (newT == t) return;
     final TextSelection ns;
     if (sel.isCollapsed) {
       final rel = sel.start - a;
@@ -126,8 +228,12 @@ class RichCtl extends TextEditingController {
     } else {
       ns = TextSelection(baseOffset: a, extentOffset: a + nt.length);
     }
-    _off = ns.baseOffset;
-    value = TextEditingValue(text: newT, selection: ns);
+    _discrete(() {
+      chars.replaceRange(a, e, nc);
+      _old = newT;
+      _off = ns.baseOffset;
+      value = TextEditingValue(text: newT, selection: ns);
+    });
   }
 
   /// Flips ☐ / ☑ on the line that has the cursor.
@@ -139,17 +245,20 @@ class RichCtl extends TextEditingController {
     final ch = t[a];
     if ((ch != '☐' && ch != '☑') || t[a + 1] != ' ') return;
     final newT = t.replaceRange(a, a + 1, ch == '☐' ? '☑' : '☐');
-    _old = newT; // same length and style, so `chars` stays valid
-    value = value.copyWith(text: newT);
+    _discrete(() {
+      _old = newT; // same length and style, so `chars` stays valid
+      value = value.copyWith(text: newT);
+    });
   }
 
   List<Run> runs() {
     final out = <Run>[];
-    for (int i = 0; i < text.length; i++) {
-      if (out.isNotEmpty && out.last.s == chars[i]) {
-        out[out.length - 1] = Run(out.last.t + text[i], chars[i]);
-      } else {
-        out.add(Run(text[i], chars[i]));
+    final t = text;
+    int start = 0;
+    for (int i = 1; i <= t.length; i++) {
+      if (i == t.length || chars[i] != chars[start]) {
+        out.add(Run(t.substring(start, i), chars[start]));
+        start = i;
       }
     }
     return out;

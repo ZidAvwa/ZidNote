@@ -6,23 +6,61 @@ late SharedPreferences _prefs;
 
 Future<void> initStorage() async => _prefs = await SharedPreferences.getInstance();
 
-// ---- Notes ----
+const trashDays = 30;
+int _now() => DateTime.now().millisecondsSinceEpoch;
 
-List<Note> loadNotes() => (_prefs.getStringList('notes') ?? [])
+// ---- Notes (active + trash share one list; trash = deletedAt != 0) ----
+
+List<Note> _readAll() => (_prefs.getStringList('notes') ?? [])
     .map((s) => Note.fromJson(jsonDecode(s)))
     .toList();
 
-void _writeNotes(List<Note> all) =>
+void _writeAll(List<Note> all) =>
     _prefs.setStringList('notes', all.map((x) => jsonEncode(x.toJson())).toList());
 
-void saveNote(Note n) {
-  final all = loadNotes();
-  final i = all.indexWhere((x) => x.id == n.id);
-  i >= 0 ? all[i] = n : all.insert(0, n);
-  _writeNotes(all);
+List<Note> loadNotes() => _readAll().where((n) => n.deletedAt == 0).toList();
+List<Note> loadTrash() => _readAll().where((n) => n.deletedAt != 0).toList();
+
+/// Inserts or replaces notes by id, in one write.
+void saveMany(List<Note> ns) {
+  final all = _readAll();
+  for (final n in ns) {
+    final i = all.indexWhere((x) => x.id == n.id);
+    i >= 0 ? all[i] = n : all.insert(0, n);
+  }
+  _writeAll(all);
 }
 
-void deleteNote(String id) => _writeNotes(loadNotes()..removeWhere((x) => x.id == id));
+void saveNote(Note n) => saveMany([n]);
+
+void trashNote(String id) {
+  final all = _readAll();
+  for (final n in all) {
+    if (n.id == id) {
+      n.deletedAt = _now();
+      n.pinned = false;
+    }
+  }
+  _writeAll(all);
+}
+
+void restoreNote(String id) {
+  final all = _readAll();
+  for (final n in all) {
+    if (n.id == id) n.deletedAt = 0;
+  }
+  _writeAll(all);
+}
+
+void purgeNote(String id) => _writeAll(_readAll()..removeWhere((x) => x.id == id));
+
+void emptyTrash() => _writeAll(_readAll().where((n) => n.deletedAt == 0).toList());
+
+/// Permanently removes notes that have been in the trash longer than [trashDays].
+void purgeOldTrash() {
+  final cut = _now() - trashDays * 86400000;
+  _writeAll(_readAll().where((n) => n.deletedAt == 0 || n.deletedAt > cut).toList());
+}
 
 // ---- Groups (folders) ----
 

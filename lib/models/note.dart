@@ -44,10 +44,11 @@ class Note {
   bool pinned; // pinned notes stay on top whatever the sort
   int bg; // note background color (ARGB), 0 = default
   int modified; // ms since epoch
+  int deletedAt; // 0 = normal note, else ms when moved to trash
   List<Run> runs;
 
   Note(this.id, this.title, this.runs,
-      [this.group = '', this.pinned = false, this.bg = 0, int? modified])
+      [this.group = '', this.pinned = false, this.bg = 0, int? modified, this.deletedAt = 0])
       : modified = modified ?? (int.tryParse(id) ?? 0);
 
   int get created => int.tryParse(id) ?? 0; // the id is the creation time
@@ -60,6 +61,7 @@ class Note {
         'pinned': pinned,
         'bg': bg,
         'modified': modified,
+        'deletedAt': deletedAt,
         'runs': runs.map((r) => r.toJson()).toList()
       };
 
@@ -70,5 +72,6 @@ class Note {
       j['group'] ?? '',
       j['pinned'] ?? false,
       j['bg'] ?? 0,
-      j['modified']);
+      j['modified'],
+      j['deletedAt'] ?? 0);
 }

@@ -41,17 +41,34 @@ class Run {
 
 class Note {
   String id, title, group; // group '' = no group
+  bool pinned; // pinned notes stay on top whatever the sort
+  int bg; // note background color (ARGB), 0 = default
+  int modified; // ms since epoch
   List<Run> runs;
-  Note(this.id, this.title, this.runs, [this.group = '']);
 
+  Note(this.id, this.title, this.runs,
+      [this.group = '', this.pinned = false, this.bg = 0, int? modified])
+      : modified = modified ?? (int.tryParse(id) ?? 0);
+
+  int get created => int.tryParse(id) ?? 0; // the id is the creation time
   String get plain => runs.map((r) => r.t).join();
 
   Map toJson() => {
         'id': id,
         'title': title,
         'group': group,
+        'pinned': pinned,
+        'bg': bg,
+        'modified': modified,
         'runs': runs.map((r) => r.toJson()).toList()
       };
-  factory Note.fromJson(Map j) => Note(j['id'], j['title'],
-      (j['runs'] as List).map((r) => Run.fromJson(r)).toList(), j['group'] ?? '');
+
+  factory Note.fromJson(Map j) => Note(
+      j['id'],
+      j['title'],
+      (j['runs'] as List).map((r) => Run.fromJson(r)).toList(),
+      j['group'] ?? '',
+      j['pinned'] ?? false,
+      j['bg'] ?? 0,
+      j['modified']);
 }

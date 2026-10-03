@@ -55,3 +55,34 @@ void savePresets(Map<String, List<int>> p) => _prefs.setString('presets', jsonEn
 
 String loadActivePreset() => _prefs.getString('activePreset') ?? 'Basic';
 void saveActivePreset(String n) => _prefs.setString('activePreset', n);
+
+// ---- Sort ----
+
+String loadSort() => _prefs.getString('sort') ?? 'modified';
+void saveSort(String s) => _prefs.setString('sort', s);
+
+// ---- Group colors (the color-coded group button) ----
+
+const groupPalette = [
+  0xFFE53935, 0xFFFB8C00, 0xFFFDD835, 0xFF43A047,
+  0xFF00ACC1, 0xFF1E88E5, 0xFF8E24AA, 0xFFD81B60,
+];
+
+Map<String, int> loadGroupColors() {
+  final raw = _prefs.getString('groupColors');
+  final m = raw == null
+      ? <String, int>{}
+      : (jsonDecode(raw) as Map).map((k, v) => MapEntry(k as String, v as int));
+  final gs = loadGroups();
+  var changed = false;
+  for (int i = 0; i < gs.length; i++) {
+    if (!m.containsKey(gs[i])) {
+      m[gs[i]] = groupPalette[i % groupPalette.length];
+      changed = true;
+    }
+  }
+  if (changed) saveGroupColors(m);
+  return m;
+}
+
+void saveGroupColors(Map<String, int> m) => _prefs.setString('groupColors', jsonEncode(m));

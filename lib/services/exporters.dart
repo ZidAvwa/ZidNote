@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+import 'package:file_picker/file_picker.dart';
 import 'dart:convert';
 import 'dart:io';
 import 'package:archive/archive.dart';
@@ -88,3 +90,8 @@ Future<void> shareFile(String name, List<int> bytes, String mime) async {
 
 String safeName(String t) =>
     (t.trim().isEmpty ? 'note' : t.trim()).replaceAll(RegExp(r'[^\w\- ]'), '_');
+
+/// Opens the system "save as" dialog so the user picks a device folder.
+/// Returns the saved path, or null if cancelled.
+Future<String?> saveToDevice(String name, List<int> bytes) => FilePicker.platform
+    .saveFile(dialogTitle: 'Save to…', fileName: name, bytes: Uint8List.fromList(bytes));

@@ -28,3 +28,23 @@ Future<bool> confirm(BuildContext context, String message) async =>
       ),
     ) ??
     false;
+
+/// Picks one color from a list of swatches. Returns null if dismissed.
+Future<int?> pickSwatch(BuildContext context, String title, List<int> colors) =>
+    showDialog<int>(
+      context: context,
+      builder: (d) => AlertDialog(
+        title: Text(title),
+        content: Wrap(children: [
+          for (final c in colors)
+            GestureDetector(
+              onTap: () => Navigator.pop(d, c),
+              child: Container(
+                  width: 40,
+                  height: 40,
+                  margin: const EdgeInsets.all(6),
+                  decoration: BoxDecoration(color: Color(c), shape: BoxShape.circle)),
+            ),
+        ]),
+      ),
+    );

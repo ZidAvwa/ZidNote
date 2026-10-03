@@ -25,10 +25,22 @@ class _EditorPageState extends State<EditorPage> {
   late Map<String, List<int>> presets;
   late String active;
   late List<String> groups;
+  late Map<String, int> gcolors;
+  late String _snap; // note as saved, to detect real changes
   bool showPalette = false;
 
   static const fonts = ['Roboto', 'serif', 'monospace', 'cursive', 'Arial'];
   static const sizes = <double>[10, 12, 14, 16, 18, 20, 24, 28, 32, 40];
+  static const backgrounds = {
+    'Default': 0,
+    'Cream': 0xFFFFF8E1,
+    'Mint': 0xFFE8F5E9,
+    'Sky': 0xFFE3F2FD,
+    'Rose': 0xFFFCE4EC,
+    'Lavender': 0xFFEDE7F6,
+    'Peach': 0xFFFFE0B2,
+    'Grey': 0xFFEEEEEE,
+  };
 
   @override
   void initState() {
@@ -37,29 +49,36 @@ class _EditorPageState extends State<EditorPage> {
     active = loadActivePreset();
     if (!presets.containsKey(active)) active = presets.keys.first;
     groups = loadGroups();
+    gcolors = loadGroupColors();
     if (!groups.contains(widget.note.group)) widget.note.group = '';
     ctl.load(widget.note.runs);
     ctl.addListener(() {
       if (mounted) setState(() {}); // keeps the toolbar in sync with the cursor
     });
+    _snap = jsonEncode(widget.note.toJson());
   }
 
   void save() {
-    widget.note.title = title.text;
-    widget.note.runs = ctl.runs();
-    saveNote(widget.note);
+    final n = widget.note;
+    n.title = title.text;
+    n.runs = ctl.runs();
+    if (jsonEncode(n.toJson()) != _snap) {
+      n.modified = DateTime.now().millisecondsSinceEpoch; // only when something changed
+    }
+    saveNote(n);
+    _snap = jsonEncode(n.toJson());
   }
 
   // ---- color ----
 
-  Future<void> addColor() async {
-    Color c = Color(ctl.current.color);
+  /// Color picker dialog: RGB / HSV / HSL value changers plus a hex code input at the bottom.
+  Future<Color?> pickColor(Color start) async {
+    Color c = start;
     final w = min(300.0, MediaQuery.of(context).size.width - 120);
     final ok = await showDialog<bool>(
       context: context,
       builder: (d) => AlertDialog(
         content: SingleChildScrollView(
-          // Default RGB / HSV / HSL value changers stay; the hex code input is at the bottom.
           child: ColorPicker(
             pickerColor: c,
             onColorChanged: (v) => c = v,
@@ -69,12 +88,15 @@ class _EditorPageState extends State<EditorPage> {
             colorPickerWidth: w,
           ),
         ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(d, true), child: const Text('Add color'))
-        ],
+        actions: [TextButton(onPressed: () => Navigator.pop(d, true), child: const Text('OK'))],
       ),
     );
-    if (ok != true) return;
+    return ok == true ? c : null;
+  }
+
+  Future<void> addColor() async {
+    final c = await pickColor(Color(ctl.current.color));
+    if (c == null) return;
     final list = presets[active]!;
     if (!list.contains(c.value)) list.add(c.value);
     savePresets(presets);
@@ -101,24 +123,90 @@ class _EditorPageState extends State<EditorPage> {
     setState(() {});
   }
 
-  // ---- export ----
+  // ---- export: save to a device folder, or share ----
 
-  Future<void> export(String kind) async {
+  Future<void> doExport(String kind, {required bool toDevice}) async {
     save();
     final n = widget.note, name = safeName(n.title);
+    final String file, mime;
+    final List<int> bytes;
     switch (kind) {
       case 'docx':
-        await shareFile('$name.docx', toDocx(n),
-            'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+        file = '$name.docx';
+        bytes = toDocx(n);
+        mime = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
       case 'txt':
-        await shareFile('$name.txt', utf8.encode(n.plain), 'text/plain');
-      case 'ctxt':
-        await shareFile('$name.txt', utf8.encode(toColorTxt(n.runs)), 'text/plain');
+        file = '$name.txt';
+        bytes = utf8.encode(n.plain);
+        mime = 'text/plain';
+      default:
+        file = '${name}_color.txt';
+        bytes = utf8.encode(toColorTxt(n.runs));
+        mime = 'text/plain';
+    }
+    try {
+      if (toDevice) {
+        final path = await saveToDevice(file, bytes);
+        if (path != null && mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Saved $file')));
+        }
+      } else {
+        await shareFile(file, bytes, mime);
+      }
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Export failed: $e')));
+    }
+  }
+
+  void exportSheet() {
+    save();
+    showModalBottomSheet(
+      context: context,
+      builder: (sheet) {
+        Widget row(IconData icon, String label, String kind) => ListTile(
+              leading: Icon(icon),
+              title: Text(label),
+              trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                IconButton(
+                    tooltip: 'Save to device',
+                    icon: const Icon(Icons.save_alt),
+                    onPressed: () {
+                      Navigator.pop(sheet);
+                      doExport(kind, toDevice: true);
+                    }),
+                IconButton(
+                    tooltip: 'Share',
+                    icon: const Icon(Icons.share),
+                    onPressed: () {
+                      Navigator.pop(sheet);
+                      doExport(kind, toDevice: false);
+                    }),
+              ]),
+            );
+        return SafeArea(
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            row(Icons.description_outlined, '.docx (colors, fonts)', 'docx'),
+            row(Icons.notes, '.txt (plain)', 'txt'),
+            row(Icons.palette_outlined, '.txt (color tags)', 'ctxt'),
+          ]),
+        );
+      },
+    );
+  }
+
+  void onMenu(String v) {
+    final n = widget.note;
+    switch (v) {
+      case 'export':
+        exportSheet();
+      case 'pin':
+        setState(() => n.pinned = !n.pinned);
       case 'samsung':
         // .sdocx is Samsung's private format; share sheet -> Samsung Notes imports text.
-        await Share.share('${n.title}\n\n${n.plain}');
+        Share.share('${title.text}\n\n${ctl.text}');
       case 'parse':
-        setState(() => ctl.load(fromColorTxt(n.plain)));
+        setState(() => ctl.load(fromColorTxt(ctl.text)));
     }
   }
 
@@ -126,28 +214,77 @@ class _EditorPageState extends State<EditorPage> {
 
   String fmt(double v) => v == v.roundToDouble() ? v.toInt().toString() : v.toString();
 
-  /// Group selector, placed beside the triple-dots menu.
-  Widget groupSelector() => SizedBox(
-        width: 120,
-        child: DropdownButtonHideUnderline(
-          child: DropdownButton<String>(
-            value: widget.note.group,
-            isExpanded: true,
-            icon: const Icon(Icons.folder_outlined, size: 20),
-            items: [
-              const DropdownMenuItem(
-                  value: '', child: Text('No group', overflow: TextOverflow.ellipsis)),
-              for (final g in groups)
-                DropdownMenuItem(value: g, child: Text(g, overflow: TextOverflow.ellipsis)),
-            ],
-            onChanged: (v) => setState(() => widget.note.group = v ?? ''),
+  /// Note background selector.
+  Widget backgroundSelector() => PopupMenuButton<int>(
+        tooltip: 'Background',
+        icon: const Icon(Icons.format_color_fill),
+        onSelected: (v) async {
+          if (v == -1) {
+            final n = widget.note;
+            final c = await pickColor(Color(n.bg == 0 ? 0xFFFFFFFF : n.bg));
+            if (c != null) setState(() => n.bg = c.value);
+          } else {
+            setState(() => widget.note.bg = v);
+          }
+        },
+        itemBuilder: (_) => [
+          for (final b in backgrounds.entries)
+            PopupMenuItem<int>(
+              value: b.value,
+              child: Row(children: [
+                Container(
+                    width: 20,
+                    height: 20,
+                    decoration: BoxDecoration(
+                        color: b.value == 0 ? Colors.white : Color(b.value),
+                        shape: BoxShape.circle,
+                        border: Border.all(color: Colors.grey))),
+                const SizedBox(width: 12),
+                Text(b.key),
+              ]),
+            ),
+          const PopupMenuItem<int>(
+            value: -1,
+            child: Row(children: [Icon(Icons.colorize, size: 20), SizedBox(width: 12), Text('Custom…')]),
           ),
-        ),
+        ],
       );
+
+  /// Color-coded group button: shows only the group's color, names appear in the menu.
+  Widget groupSelector() {
+    final g = widget.note.group;
+    Color colorOf(String x) => Color(gcolors[x] ?? groupPalette[0]);
+    return PopupMenuButton<String>(
+      tooltip: 'Group',
+      icon: Icon(g.isEmpty ? Icons.folder_outlined : Icons.folder,
+          color: g.isEmpty ? null : colorOf(g)),
+      onSelected: (v) => setState(() => widget.note.group = v),
+      itemBuilder: (_) => [
+        const PopupMenuItem<String>(
+          value: '',
+          child: Row(children: [Icon(Icons.folder_off_outlined), SizedBox(width: 12), Text('No group')]),
+        ),
+        for (final x in groups)
+          PopupMenuItem<String>(
+            value: x,
+            child: Row(children: [
+              Icon(Icons.folder, color: colorOf(x)),
+              const SizedBox(width: 12),
+              Flexible(child: Text(x, overflow: TextOverflow.ellipsis)),
+            ]),
+          ),
+      ],
+    );
+  }
 
   Widget palettePanel(TS cur) {
     final colors = presets[active]!;
-    Widget swatch({required Color color, required bool on, VoidCallback? tap, VoidCallback? hold, Widget? child}) =>
+    Widget swatch(
+            {required Color color,
+            required bool on,
+            VoidCallback? tap,
+            VoidCallback? hold,
+            Widget? child}) =>
         GestureDetector(
           onTap: tap,
           onLongPress: hold,
@@ -167,42 +304,45 @@ class _EditorPageState extends State<EditorPage> {
       color: Theme.of(context).colorScheme.surface,
       child: Padding(
         padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
-        child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-          DropdownButton<String>(
-            value: active,
-            isDense: true,
-            underline: const SizedBox(),
-            items: [
-              for (final k in presets.keys) DropdownMenuItem(value: k, child: Text(k)),
-              const DropdownMenuItem(value: _newPreset, child: Text('＋ New preset…')),
-              if (presets.length > 1)
-                DropdownMenuItem(value: _delPreset, child: Text('Delete "$active"')),
-            ],
-            onChanged: onPreset,
-          ),
-          ConstrainedBox(
-            constraints: const BoxConstraints(maxHeight: 110),
-            child: SingleChildScrollView(
-              child: Wrap(children: [
-                for (final c in colors)
-                  swatch(
-                    color: Color(c),
-                    on: cur.color == c,
-                    tap: () => ctl.apply((s) => s.copy(color: c)),
-                    hold: () => setState(() {
-                      colors.remove(c);
-                      savePresets(presets);
-                    }),
-                  ),
-                swatch(
-                    color: Colors.transparent,
-                    on: false,
-                    tap: addColor,
-                    child: const Icon(Icons.add, size: 18)),
-              ]),
-            ),
-          ),
-        ]),
+        child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              DropdownButton<String>(
+                value: active,
+                isDense: true,
+                underline: const SizedBox(),
+                items: [
+                  for (final k in presets.keys) DropdownMenuItem(value: k, child: Text(k)),
+                  const DropdownMenuItem(value: _newPreset, child: Text('＋ New preset…')),
+                  if (presets.length > 1)
+                    DropdownMenuItem(value: _delPreset, child: Text('Delete "$active"')),
+                ],
+                onChanged: onPreset,
+              ),
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 110),
+                child: SingleChildScrollView(
+                  child: Wrap(children: [
+                    for (final c in colors)
+                      swatch(
+                        color: Color(c),
+                        on: cur.color == c,
+                        tap: () => ctl.apply((s) => s.copy(color: c)),
+                        hold: () => setState(() {
+                          colors.remove(c);
+                          savePresets(presets);
+                        }),
+                      ),
+                    swatch(
+                        color: Colors.transparent,
+                        on: false,
+                        tap: addColor,
+                        child: const Icon(Icons.add, size: 18)),
+                  ]),
+                ),
+              ),
+            ]),
       ),
     );
   }
@@ -289,23 +429,25 @@ class _EditorPageState extends State<EditorPage> {
   @override
   Widget build(BuildContext context) {
     final cur = ctl.current;
+    final n = widget.note;
     return PopScope(
       onPopInvokedWithResult: (_, __) => save(),
       child: Scaffold(
+        backgroundColor: n.bg == 0 ? null : Color(n.bg),
         appBar: AppBar(
           title: TextField(
               controller: title,
               decoration: const InputDecoration(hintText: 'Title', border: InputBorder.none)),
           actions: [
+            backgroundSelector(),
             groupSelector(),
             PopupMenuButton<String>(
-              onSelected: export,
-              itemBuilder: (_) => const [
-                PopupMenuItem(value: 'docx', child: Text('Save as .docx')),
-                PopupMenuItem(value: 'txt', child: Text('Save as .txt (plain)')),
-                PopupMenuItem(value: 'ctxt', child: Text('Save as .txt (with colors)')),
-                PopupMenuItem(value: 'samsung', child: Text('Send to Samsung Notes')),
-                PopupMenuItem(value: 'parse', child: Text('Parse <#color> tags in text')),
+              onSelected: onMenu,
+              itemBuilder: (_) => [
+                const PopupMenuItem(value: 'export', child: Text('Export…')),
+                PopupMenuItem(value: 'pin', child: Text(n.pinned ? 'Unpin' : 'Pin to top')),
+                const PopupMenuItem(value: 'samsung', child: Text('Send to Samsung Notes')),
+                const PopupMenuItem(value: 'parse', child: Text('Parse <#color> tags in text')),
               ],
             ),
           ],

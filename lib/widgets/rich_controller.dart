@@ -15,6 +15,7 @@ class _Snap {
 class RichCtl extends TextEditingController {
   List<TS> chars = [];
   TS pen = TS.def; // style for newly typed text when nothing is selected
+  int bg = 0; // note background color, set by the editor (for readable text on dark)
   String _old = '';
   int _off = -1;
 
@@ -267,7 +268,8 @@ class RichCtl extends TextEditingController {
   @override
   TextSpan buildTextSpan(
       {required BuildContext context, TextStyle? style, required bool withComposing}) {
-    return TextSpan(children: [for (final r in runs()) TextSpan(text: r.t, style: r.s.style)]);
+    final ink = autoInk(context, bg);
+    return TextSpan(children: [for (final r in runs()) TextSpan(text: r.t, style: r.s.styleOn(ink))]);
   }
 }
 

@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import '../models/note.dart';
+import '../services/app_theme.dart';
 import '../services/backup.dart';
 import '../services/exporters.dart';
 import '../services/importers.dart';
@@ -85,6 +86,25 @@ class _NotesPageState extends State<NotesPage> {
     refresh();
   }
 
+  Future<void> pickTheme() async {
+    final cur = loadTheme();
+    final v = await showDialog<String>(
+      context: context,
+      builder: (d) => SimpleDialog(title: const Text('Theme'), children: [
+        for (final e in {'system': 'System default', 'light': 'Light', 'dark': 'Dark'}.entries)
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(d, e.key),
+            child: Row(children: [
+              Icon(cur == e.key ? Icons.radio_button_checked : Icons.radio_button_off),
+              const SizedBox(width: 12),
+              Text(e.value),
+            ]),
+          ),
+      ]),
+    );
+    if (v != null) setTheme(v);
+  }
+
   // ---- sorting: pinned notes always first ----
 
   List<Note> sorted(List<Note> l) => l
@@ -155,9 +175,13 @@ class _NotesPageState extends State<NotesPage> {
   }
 
   Future<void> changeGroupColor() async {
-    final c = await pickSwatch(context, 'Group color', groupPalette);
+    final pick = await pickSwatch(context, 'Group color', groupPalette, custom: true);
+    if (pick == null || !mounted) return;
+    final Color? c = pick == -1
+        ? await pickColorDialog(context, Color(gcolors[filter] ?? groupPalette[0]))
+        : Color(pick);
     if (c == null) return;
-    gcolors[filter] = c;
+    gcolors[filter] = c.value;
     saveGroupColors(gcolors);
     setState(() {});
   }
@@ -337,7 +361,9 @@ class _NotesPageState extends State<NotesPage> {
     );
   }
 
-  Widget card(Note n) => Card(
+  Widget card(Note n) {
+    final ink = autoInk(context, n.bg);
+    return Card(
         color: n.bg == 0 ? null : Color(n.bg),
         child: InkWell(
           onTap: () => open(n),
@@ -357,13 +383,14 @@ class _NotesPageState extends State<NotesPage> {
               Expanded(
                   child: Text.rich(
                       TextSpan(children: [
-                        for (final r in n.runs) TextSpan(text: r.t, style: r.s.style)
+                        for (final r in n.runs) TextSpan(text: r.t, style: r.s.styleOn(ink))
                       ]),
                       overflow: TextOverflow.fade)),
             ]),
           ),
         ),
-      );
+    );
+  }
 
   Widget page(String value) {
     final list = sorted(value == _all
@@ -430,6 +457,7 @@ class _NotesPageState extends State<NotesPage> {
                       if (v == 'import') importNote();
                       if (v == 'backup') backupSheet();
                       if (v == 'trash') openTrash();
+                      if (v == 'theme') pickTheme();
                       if (v == 'rename') renameGroup();
                       if (v == 'color') changeGroupColor();
                       if (v == 'delete') deleteGroup();
@@ -438,6 +466,7 @@ class _NotesPageState extends State<NotesPage> {
                       const PopupMenuItem(value: 'import', child: Text('Import note (.docx / .txt)')),
                       const PopupMenuItem(value: 'backup', child: Text('Backup & restore')),
                       const PopupMenuItem(value: 'trash', child: Text('Trash')),
+                      const PopupMenuItem(value: 'theme', child: Text('Theme')),
                       if (realGroup) const PopupMenuItem(value: 'rename', child: Text('Rename group')),
                       if (realGroup) const PopupMenuItem(value: 'color', child: Text('Group color')),
                       if (realGroup) const PopupMenuItem(value: 'delete', child: Text('Delete group')),

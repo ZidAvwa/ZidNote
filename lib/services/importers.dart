@@ -9,7 +9,18 @@ String _unx(String s) => s
     .replaceAll('&apos;', "'")
     .replaceAll('&amp;', '&');
 
-/// Reads color, font, size and bold from a run's <w:rPr> block.
+const _namedHighlights = {
+  'yellow': 0xFFFFFF00,
+  'green': 0xFF00FF00,
+  'cyan': 0xFF00FFFF,
+  'magenta': 0xFFFF00FF,
+  'red': 0xFFFF0000,
+  'blue': 0xFF0000FF,
+  'lightGray': 0xFFC0C0C0,
+};
+
+/// Reads color, font, size, bold, italic, underline, strike and highlight
+/// from a run's <w:rPr> block.
 TS _rpr(String rpr) {
   var s = TS.def;
   final c = RegExp(r'<w:color w:val="([0-9A-Fa-f]{6})"').firstMatch(rpr);
@@ -18,8 +29,17 @@ TS _rpr(String rpr) {
   if (f != null) s = s.copy(font: f[1]);
   final z = RegExp(r'<w:sz w:val="(\d+)"').firstMatch(rpr);
   if (z != null) s = s.copy(size: int.parse(z[1]!) / 2);
-  if (RegExp(r'<w:b\s*/>|<w:b\s+w:val="(?:1|true|on)"').hasMatch(rpr)) {
-    s = s.copy(bold: true);
+  bool on(String tag) =>
+      RegExp('<w:$tag\\s*/>|<w:$tag\\s+w:val="(?:1|true|on)"').hasMatch(rpr);
+  if (on('b')) s = s.copy(bold: true);
+  if (on('i')) s = s.copy(italic: true);
+  if (on('strike')) s = s.copy(strike: true);
+  if (RegExp(r'<w:u\s+w:val="(?!none)[^"]+"').hasMatch(rpr)) s = s.copy(underline: true);
+  final shd = RegExp(r'<w:shd[^>]*w:fill="([0-9A-Fa-f]{6})"').firstMatch(rpr);
+  if (shd != null) s = s.copy(highlight: 0xFF000000 | int.parse(shd[1]!, radix: 16));
+  final hl = RegExp(r'<w:highlight w:val="(\w+)"').firstMatch(rpr);
+  if (hl != null && _namedHighlights.containsKey(hl[1])) {
+    s = s.copy(highlight: _namedHighlights[hl[1]]);
   }
   return s;
 }

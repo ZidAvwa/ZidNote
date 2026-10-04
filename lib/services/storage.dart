@@ -124,3 +124,11 @@ Map<String, int> loadGroupColors() {
 }
 
 void saveGroupColors(Map<String, int> m) => _prefs.setString('groupColors', jsonEncode(m));
+
+// ---- Misc ----
+
+bool noteExists(String id) => _readAll().any((n) => n.id == id);
+
+/// 'system', 'light' or 'dark'
+String loadTheme() => _prefs.getString('theme') ?? 'system';
+void saveTheme(String t) => _prefs.setString('theme', t);

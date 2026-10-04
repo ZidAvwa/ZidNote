@@ -1,8 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:math';
 import 'package:flutter/material.dart';
-import 'package:flutter_colorpicker/flutter_colorpicker.dart';
 import 'package:share_plus/share_plus.dart';
 import '../models/note.dart';
 import '../services/exporters.dart';
@@ -30,7 +28,9 @@ class _EditorPageState extends State<EditorPage> with WidgetsBindingObserver {
   late List<String> groups;
   late Map<String, int> gcolors;
   late String _snap; // note as saved, to detect real changes
-  bool showPalette = false;
+  String panel = ''; // open panel: '', 'color' or 'format'
+  late final String _orig; // the note as it was when opened
+  late final bool _existed; // was it already saved before this session?
 
   static const fonts = ['Roboto', 'serif', 'monospace', 'cursive', 'Arial'];
   static const sizes = <double>[10, 12, 14, 16, 18, 20, 24, 28, 32, 40];
@@ -48,6 +48,8 @@ class _EditorPageState extends State<EditorPage> with WidgetsBindingObserver {
   @override
   void initState() {
     super.initState();
+    _orig = jsonEncode(widget.note.toJson());
+    _existed = noteExists(widget.note.id);
     presets = loadPresets();
     active = loadActivePreset();
     if (!presets.containsKey(active)) active = presets.keys.first;
@@ -99,28 +101,7 @@ class _EditorPageState extends State<EditorPage> with WidgetsBindingObserver {
 
   // ---- color ----
 
-  /// Color picker dialog: RGB / HSV / HSL value changers plus a hex code input at the bottom.
-  Future<Color?> pickColor(Color start) async {
-    Color c = start;
-    final w = min(300.0, MediaQuery.of(context).size.width - 120);
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (d) => AlertDialog(
-        content: SingleChildScrollView(
-          child: ColorPicker(
-            pickerColor: c,
-            onColorChanged: (v) => c = v,
-            enableAlpha: false,
-            hexInputBar: true,
-            portraitOnly: true,
-            colorPickerWidth: w,
-          ),
-        ),
-        actions: [TextButton(onPressed: () => Navigator.pop(d, true), child: const Text('OK'))],
-      ),
-    );
-    return ok == true ? c : null;
-  }
+  Future<Color?> pickColor(Color start) => pickColorDialog(context, start);
 
   Future<void> addColor() async {
     final c = await pickColor(Color(ctl.current.color));
@@ -149,6 +130,27 @@ class _EditorPageState extends State<EditorPage> with WidgetsBindingObserver {
     savePresets(presets);
     saveActivePreset(active);
     setState(() {});
+  }
+
+  /// Undoes everything done since the note was opened (also what autosave saved).
+  Future<void> discardAndClose() async {
+    final n = widget.note;
+    n.title = title.text;
+    n.runs = ctl.runs();
+    final changed = jsonEncode(n.toJson()) != _snap || _snap != _orig;
+    if (changed &&
+        !await confirm(context, 'Discard everything you changed since opening this note?',
+            yes: 'Discard')) {
+      return;
+    }
+    _timer?.cancel();
+    _gone = true; // stops autosave and the save on exit
+    if (_existed) {
+      saveNote(Note.fromJson(jsonDecode(_orig)));
+    } else {
+      purgeNote(n.id);
+    }
+    if (mounted) Navigator.pop(context);
   }
 
   // ---- export: save to a device folder, or share ----
@@ -235,6 +237,8 @@ class _EditorPageState extends State<EditorPage> with WidgetsBindingObserver {
         Share.share('${title.text}\n\n${ctl.text}');
       case 'parse':
         ctl.replaceRuns(fromColorTxt(ctl.text));
+      case 'discard':
+        discardAndClose();
       case 'trash':
         n.deletedAt = DateTime.now().millisecondsSinceEpoch;
         n.pinned = false;
@@ -245,6 +249,12 @@ class _EditorPageState extends State<EditorPage> with WidgetsBindingObserver {
   }
 
   // ---- UI pieces ----
+
+  String counts() {
+    final t = ctl.text;
+    final words = RegExp(r'\S+').allMatches(t).length;
+    return '$words ${words == 1 ? 'word' : 'words'} · ${t.length} chars';
+  }
 
   String fmt(double v) => v == v.roundToDouble() ? v.toInt().toString() : v.toString();
 
@@ -381,6 +391,57 @@ class _EditorPageState extends State<EditorPage> with WidgetsBindingObserver {
     );
   }
 
+  static const highlights = [0xFFFFF59D, 0xFFA5D6A7, 0xFF81D4FA, 0xFFF48FB1, 0xFFFFCC80, 0xFFCE93D8];
+
+  Widget formatPanel(TS cur) {
+    final primary = Theme.of(context).colorScheme.primary;
+    Widget tog(IconData icon, String tip, bool on, TS Function(TS) f) => IconButton(
+          tooltip: tip,
+          icon: Icon(icon, color: on ? primary : null),
+          style: on ? IconButton.styleFrom(backgroundColor: primary.withAlpha(40)) : null,
+          onPressed: () => ctl.apply(f),
+        );
+    Widget dot(Color? c, bool on, VoidCallback tap, {Widget? child}) => GestureDetector(
+          onTap: tap,
+          child: Container(
+            width: 32,
+            height: 32,
+            margin: const EdgeInsets.all(6),
+            decoration: BoxDecoration(
+                color: c,
+                shape: BoxShape.circle,
+                border: Border.all(color: on ? Colors.blue : Colors.grey, width: on ? 3 : 1)),
+            child: child,
+          ),
+        );
+    return Material(
+      elevation: 4,
+      color: Theme.of(context).colorScheme.surface,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
+        child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [
+            tog(Icons.format_bold, 'Bold', cur.bold, (s) => s.copy(bold: !s.bold)),
+            tog(Icons.format_italic, 'Italic', cur.italic, (s) => s.copy(italic: !s.italic)),
+            tog(Icons.format_underlined, 'Underline', cur.underline, (s) => s.copy(underline: !s.underline)),
+            tog(Icons.format_strikethrough, 'Strikethrough', cur.strike, (s) => s.copy(strike: !s.strike)),
+          ]),
+          const Text('Highlight', style: TextStyle(fontSize: 11, color: Colors.grey)),
+          Wrap(children: [
+            dot(null, cur.highlight == 0, () => ctl.apply((s) => s.copy(highlight: 0)),
+                child: const Icon(Icons.format_color_reset, size: 18)),
+            for (final h in highlights)
+              dot(Color(h), cur.highlight == h, () => ctl.apply((s) => s.copy(highlight: h))),
+            dot(null, false, () async {
+              final c = await pickColor(Color(cur.highlight == 0 ? 0xFFFFF59D : cur.highlight));
+              if (c != null) ctl.apply((s) => s.copy(highlight: c.value));
+            }, child: const Icon(Icons.add, size: 18)),
+          ]),
+        ]),
+      ),
+    );
+  }
+
   /// Icon-only bottom bar (all icons fit on screen, no scrolling).
   Widget bottomBar(TS cur) {
     final fontList = {...fonts, cur.font}.toList();
@@ -424,9 +485,9 @@ class _EditorPageState extends State<EditorPage> with WidgetsBindingObserver {
               ],
             ),
             IconButton(
-              tooltip: 'Bold',
-              icon: Icon(Icons.format_bold, color: cur.bold ? primary : null),
-              onPressed: () => ctl.apply((s) => s.copy(bold: !s.bold)),
+              tooltip: 'Text style',
+              icon: Icon(Icons.text_format, color: panel == 'format' ? primary : null),
+              onPressed: () => setState(() => panel = panel == 'format' ? '' : 'format'),
             ),
             IconButton(
               tooltip: 'Color',
@@ -436,9 +497,9 @@ class _EditorPageState extends State<EditorPage> with WidgetsBindingObserver {
                 decoration: BoxDecoration(
                     color: Color(cur.color),
                     shape: BoxShape.circle,
-                    border: Border.all(color: showPalette ? primary : Colors.grey, width: 2)),
+                    border: Border.all(color: panel == 'color' ? primary : Colors.grey, width: 2)),
               ),
-              onPressed: () => setState(() => showPalette = !showPalette),
+              onPressed: () => setState(() => panel = panel == 'color' ? '' : 'color'),
             ),
             PopupMenuButton<String>(
               tooltip: 'List',
@@ -472,6 +533,7 @@ class _EditorPageState extends State<EditorPage> with WidgetsBindingObserver {
   Widget build(BuildContext context) {
     final cur = ctl.current;
     final n = widget.note;
+    ctl.bg = n.bg; // lets the editor show readable text on dark backgrounds
     return PopScope(
       onPopInvokedWithResult: (_, __) => save(),
       child: Scaffold(
@@ -491,6 +553,7 @@ class _EditorPageState extends State<EditorPage> with WidgetsBindingObserver {
                 const PopupMenuItem(value: 'samsung', child: Text('Send to Samsung Notes')),
                 const PopupMenuItem(value: 'parse', child: Text('Parse <#color> tags in text')),
                 const PopupMenuItem(value: 'trash', child: Text('Move to trash')),
+                const PopupMenuItem(value: 'discard', child: Text('Close without saving')),
               ],
             ),
           ],
@@ -502,6 +565,9 @@ class _EditorPageState extends State<EditorPage> with WidgetsBindingObserver {
               child: TextField(
                   controller: ctl,
                   inputFormatters: [ListContinue()],
+                  cursorColor: (n.bg != 0 && Color(n.bg).computeLuminance() >= 0.4)
+                      ? Colors.black87
+                      : null,
                   maxLines: null,
                   expands: true,
                   textAlignVertical: TextAlignVertical.top,
@@ -509,7 +575,15 @@ class _EditorPageState extends State<EditorPage> with WidgetsBindingObserver {
                       const InputDecoration(border: InputBorder.none, hintText: 'Write here…')),
             ),
           ),
-          if (showPalette) palettePanel(cur),
+          Align(
+            alignment: Alignment.centerRight,
+            child: Padding(
+              padding: const EdgeInsets.only(right: 14, bottom: 2),
+              child: Text(counts(), style: const TextStyle(fontSize: 11, color: Colors.grey)),
+            ),
+          ),
+          if (panel == 'color') palettePanel(cur),
+          if (panel == 'format') formatPanel(cur),
           bottomBar(cur),
         ]),
       ),

@@ -7,6 +7,7 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await initStorage();
   purgeOldTrash(); // trash older than 30 days is removed
+  await cleanupImages(); // photos / drawings no note uses any more
   initTheme();
   runApp(ValueListenableBuilder<ThemeMode>(
     valueListenable: themeMode,

@@ -1,11 +1,13 @@
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
+import 'dart:ui' as ui;
 import 'package:archive/archive.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 import '../models/note.dart';
+import 'storage.dart';
 
 /// "abc<#111111,Roboto,18,biu,h=FFFF00> ..." — each tag follows the text it styles.
 /// Fields after the color: font, size, flags (b i u s), h=RRGGBB highlight.
@@ -69,9 +71,10 @@ List<Run> fromColorTxt(String src) {
 String _x(String s) =>
     s.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
 
-/// Minimal .docx (a zip with 3 XML files) keeping color, font, size, bold,
-/// italic, underline, strikethrough and highlight.
-List<int> toDocx(Note n) {
+/// .docx (a zip of XML files) keeping color, font, size, bold, italic, underline,
+/// strikethrough and highlight. Photos and drawings are added after the text.
+Future<List<int>> toDocx(Note n) async {
+  const ns = 'http://schemas.openxmlformats.org/';
   final body = StringBuffer(
       '<w:p><w:r><w:rPr><w:b/><w:sz w:val="36"/></w:rPr><w:t>${_x(n.title)}</w:t></w:r></w:p><w:p>');
   for (final r in n.runs) {
@@ -92,20 +95,69 @@ List<int> toDocx(Note n) {
   }
   body.write('</w:p>');
 
-  const ns = 'http://schemas.openxmlformats.org/';
-  final files = {
+  // photos and drawings
+  final media = <String, List<int>>{};
+  final rels = StringBuffer();
+  final exts = <String>{};
+  int k = 0;
+  for (final name in n.images) {
+    final f = File(imagePath(name));
+    if (!await f.exists()) continue;
+    final bytes = await f.readAsBytes();
+    int w = 800, h = 600;
+    try {
+      final codec = await ui.instantiateImageCodec(bytes);
+      final fr = await codec.getNextFrame();
+      w = fr.image.width;
+      h = fr.image.height;
+    } catch (_) {}
+    k++;
+    var ext = name.split('.').last.toLowerCase();
+    if (ext == 'jpeg') ext = 'jpg';
+    exts.add(ext);
+    media['word/media/image$k.$ext'] = bytes;
+    rels.write('<Relationship Id="rIdImg$k" Type="${ns}officeDocument/2006/relationships/image" '
+        'Target="media/image$k.$ext"/>');
+    var cx = w * 9525, cy = h * 9525; // EMU at 96 dpi
+    const maxCx = 5486400; // 6 inches
+    if (cx > maxCx) {
+      cy = (cy * maxCx / cx).round();
+      cx = maxCx;
+    }
+    body.write('<w:p><w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0">'
+        '<wp:extent cx="$cx" cy="$cy"/><wp:docPr id="$k" name="Picture $k"/>'
+        '<a:graphic xmlns:a="${ns}drawingml/2006/main">'
+        '<a:graphicData uri="${ns}drawingml/2006/picture">'
+        '<pic:pic xmlns:pic="${ns}drawingml/2006/picture">'
+        '<pic:nvPicPr><pic:cNvPr id="$k" name="image$k"/><pic:cNvPicPr/></pic:nvPicPr>'
+        '<pic:blipFill><a:blip r:embed="rIdImg$k"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>'
+        '<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="$cx" cy="$cy"/></a:xfrm>'
+        '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>'
+        '</pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>');
+  }
+
+  const mimes = {'png': 'image/png', 'jpg': 'image/jpeg', 'webp': 'image/webp', 'gif': 'image/gif'};
+  final defaults = exts
+      .map((e) => '<Default Extension="$e" ContentType="${mimes[e] ?? 'application/octet-stream'}"/>')
+      .join();
+
+  final files = <String, String>{
     '[Content_Types].xml':
-        '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="${ns}package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>',
+        '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="${ns}package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>$defaults<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>',
     '_rels/.rels':
         '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="${ns}package/2006/relationships"><Relationship Id="rId1" Type="${ns}officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>',
     'word/document.xml':
-        '<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="${ns}wordprocessingml/2006/main"><w:body>$body</w:body></w:document>',
+        '<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="${ns}wordprocessingml/2006/main" xmlns:r="${ns}officeDocument/2006/relationships" xmlns:wp="${ns}drawingml/2006/wordprocessingDrawing"><w:body>$body</w:body></w:document>',
+    if (k > 0)
+      'word/_rels/document.xml.rels':
+          '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="${ns}package/2006/relationships">$rels</Relationships>',
   };
   final ar = Archive();
-  files.forEach((k, v) {
+  files.forEach((path, v) {
     final d = utf8.encode(v);
-    ar.addFile(ArchiveFile(k, d.length, d));
+    ar.addFile(ArchiveFile(path, d.length, d));
   });
+  media.forEach((path, b) => ar.addFile(ArchiveFile(path, b.length, b)));
   return ZipEncoder().encode(ar)!;
 }
 

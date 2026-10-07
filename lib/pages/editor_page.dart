@@ -1,11 +1,15 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:share_plus/share_plus.dart';
 import '../models/note.dart';
+import '../models/stroke.dart';
 import '../services/exporters.dart';
 import '../services/storage.dart';
 import '../widgets/dialogs.dart';
+import '../widgets/draw_page.dart';
 import '../widgets/rich_controller.dart';
 
 const _newPreset = '__new__';
@@ -29,6 +33,9 @@ class _EditorPageState extends State<EditorPage> with WidgetsBindingObserver {
   late Map<String, int> gcolors;
   late String _snap; // note as saved, to detect real changes
   String panel = ''; // open panel: '', 'color' or 'format'
+  bool finding = false; // "find in note" bar
+  final findCtl = TextEditingController();
+  final editorFocus = FocusNode();
   late final String _orig; // the note as it was when opened
   late final bool _existed; // was it already saved before this session?
 
@@ -96,6 +103,8 @@ class _EditorPageState extends State<EditorPage> with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     ctl.dispose();
     title.dispose();
+    findCtl.dispose();
+    editorFocus.dispose();
     super.dispose();
   }
 
@@ -153,6 +162,189 @@ class _EditorPageState extends State<EditorPage> with WidgetsBindingObserver {
     if (mounted) Navigator.pop(context);
   }
 
+  // ---- find in note ----
+
+  Widget findBar() {
+    final n = ctl.matchCount;
+    return Material(
+      elevation: 2,
+      child: Padding(
+        padding: const EdgeInsets.only(left: 12),
+        child: Row(children: [
+          Expanded(
+            child: TextField(
+              controller: findCtl,
+              autofocus: true,
+              decoration: const InputDecoration(hintText: 'Find in note', border: InputBorder.none),
+              onChanged: ctl.setFind,
+            ),
+          ),
+          Text(n == 0 ? '0/0' : '${ctl.findIndex + 1}/$n',
+              style: const TextStyle(fontSize: 12, color: Colors.grey)),
+          IconButton(
+              tooltip: 'Previous',
+              icon: const Icon(Icons.keyboard_arrow_up),
+              onPressed: n == 0
+                  ? null
+                  : () {
+                      ctl.findStep(-1);
+                      editorFocus.requestFocus();
+                    }),
+          IconButton(
+              tooltip: 'Next',
+              icon: const Icon(Icons.keyboard_arrow_down),
+              onPressed: n == 0
+                  ? null
+                  : () {
+                      ctl.findStep(1);
+                      editorFocus.requestFocus();
+                    }),
+          IconButton(
+              tooltip: 'Close',
+              icon: const Icon(Icons.close),
+              onPressed: () {
+                findCtl.clear();
+                ctl.setFind('');
+                setState(() => finding = false);
+              }),
+        ]),
+      ),
+    );
+  }
+
+  // ---- photos and drawings (stored as files, the note keeps their names) ----
+
+  void snack(String m) {
+    if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(m)));
+  }
+
+  Future<void> addPhotos(ImageSource src) async {
+    try {
+      final picker = ImagePicker();
+      final files = <XFile>[];
+      if (src == ImageSource.gallery) {
+        files.addAll(await picker.pickMultiImage(maxWidth: 1600, imageQuality: 85));
+      } else {
+        final x = await picker.pickImage(source: src, maxWidth: 1600, imageQuality: 85);
+        if (x != null) files.add(x);
+      }
+      for (final x in files) {
+        var ext = x.path.split('.').last.toLowerCase();
+        if (!const ['png', 'jpg', 'jpeg', 'webp'].contains(ext)) ext = 'jpg';
+        final name = newImageName('img', ext);
+        await File(x.path).copy(imagePath(name));
+        widget.note.images.add(name);
+      }
+      if (files.isNotEmpty) {
+        setState(() {});
+        _schedule();
+      }
+    } catch (e) {
+      snack('Could not add photo: $e');
+    }
+  }
+
+  /// Opens the handwriting page; [editing] is an existing drawing to continue.
+  Future<void> drawNote({String? editing}) async {
+    try {
+      var initial = <Stroke>[];
+      if (editing != null) {
+        final f = File(imagePath(strokesName(editing)));
+        if (f.existsSync()) {
+          initial = (jsonDecode(f.readAsStringSync()) as List).map((e) => Stroke.fromJson(e)).toList();
+        }
+      }
+      final result = await Navigator.push<List<Stroke>>(
+          context, MaterialPageRoute(builder: (_) => DrawPage(initial: initial, paper: widget.note.bg)));
+      if (result == null || (result.isEmpty && editing == null)) return;
+      final name = newImageName('draw', 'png'); // a new file each time, so "close without saving" can go back
+      final paper = widget.note.bg == 0 ? Colors.white : Color(widget.note.bg);
+      File(imagePath(name)).writeAsBytesSync(await renderDrawing(result, paper));
+      File(imagePath(strokesName(name)))
+          .writeAsStringSync(jsonEncode(result.map((s) => s.toJson()).toList()));
+      final imgs = widget.note.images;
+      final i = editing == null ? -1 : imgs.indexOf(editing);
+      setState(() => i >= 0 ? imgs[i] = name : imgs.add(name));
+      _schedule();
+    } catch (e) {
+      snack('Could not save drawing: $e');
+    }
+  }
+
+  void viewImage(String name) => Navigator.push(
+      context,
+      MaterialPageRoute(
+          builder: (_) => Scaffold(
+                backgroundColor: Colors.black,
+                appBar: AppBar(backgroundColor: Colors.black, foregroundColor: Colors.white),
+                body: Center(
+                    child: InteractiveViewer(maxScale: 5, child: Image.file(File(imagePath(name))))),
+              )));
+
+  Future<void> attachmentMenu(int i) async {
+    final name = widget.note.images[i];
+    final v = await showModalBottomSheet<String>(
+      context: context,
+      builder: (s) => SafeArea(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          ListTile(
+              leading: const Icon(Icons.save_alt),
+              title: const Text('Save to device'),
+              onTap: () => Navigator.pop(s, 'save')),
+          ListTile(
+              leading: const Icon(Icons.delete_outline),
+              title: const Text('Remove from note'),
+              onTap: () => Navigator.pop(s, 'remove')),
+        ]),
+      ),
+    );
+    if (v == 'remove') {
+      setState(() => widget.note.images.removeAt(i)); // the file is cleaned up later
+      _schedule();
+    } else if (v == 'save') {
+      try {
+        final p = await saveToDevice(name, File(imagePath(name)).readAsBytesSync());
+        if (p != null) snack('Saved $name');
+      } catch (e) {
+        snack('Could not save: $e');
+      }
+    }
+  }
+
+  Widget attachments() {
+    final imgs = widget.note.images;
+    return SizedBox(
+      height: 108,
+      child: ListView.builder(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 8),
+        itemCount: imgs.length,
+        itemBuilder: (_, i) {
+          final name = imgs[i];
+          return GestureDetector(
+            onTap: () => isDrawing(name) ? drawNote(editing: name) : viewImage(name),
+            onLongPress: () => attachmentMenu(i),
+            child: Container(
+              width: 100,
+              margin: const EdgeInsets.all(4),
+              clipBehavior: Clip.antiAlias,
+              decoration: BoxDecoration(
+                  border: Border.all(color: Colors.grey), borderRadius: BorderRadius.circular(8)),
+              child: Stack(fit: StackFit.expand, children: [
+                Image.file(File(imagePath(name)),
+                    fit: BoxFit.cover,
+                    cacheWidth: 300,
+                    errorBuilder: (_, __, ___) => const Icon(Icons.broken_image)),
+                if (isDrawing(name))
+                  const Positioned(right: 4, bottom: 4, child: Icon(Icons.draw, size: 16)),
+              ]),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
   // ---- export: save to a device folder, or share ----
 
   Future<void> doExport(String kind, {required bool toDevice}) async {
@@ -163,7 +355,7 @@ class _EditorPageState extends State<EditorPage> with WidgetsBindingObserver {
     switch (kind) {
       case 'docx':
         file = '$name.docx';
-        bytes = toDocx(n);
+        bytes = await toDocx(n);
         mime = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
       case 'txt':
         file = '$name.txt';
@@ -237,6 +429,8 @@ class _EditorPageState extends State<EditorPage> with WidgetsBindingObserver {
         Share.share('${title.text}\n\n${ctl.text}');
       case 'parse':
         ctl.replaceRuns(fromColorTxt(ctl.text));
+      case 'find':
+        setState(() => finding = true);
       case 'discard':
         discardAndClose();
       case 'trash':
@@ -420,6 +614,29 @@ class _EditorPageState extends State<EditorPage> with WidgetsBindingObserver {
       child: Padding(
         padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
         child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            DropdownButton<String>(
+              value: cur.font,
+              isDense: true,
+              underline: const SizedBox(),
+              items: [
+                for (final f in {...fonts, cur.font})
+                  DropdownMenuItem(value: f, child: Text(f, style: TextStyle(fontFamily: f))),
+              ],
+              onChanged: (v) => ctl.apply((s) => s.copy(font: v)),
+            ),
+            const SizedBox(width: 24),
+            DropdownButton<double>(
+              value: cur.size,
+              isDense: true,
+              underline: const SizedBox(),
+              items: [
+                for (final z in (<double>{...sizes, cur.size}.toList()..sort()))
+                  DropdownMenuItem(value: z, child: Text(fmt(z))),
+              ],
+              onChanged: (v) => ctl.apply((s) => s.copy(size: v)),
+            ),
+          ]),
           Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [
             tog(Icons.format_bold, 'Bold', cur.bold, (s) => s.copy(bold: !s.bold)),
             tog(Icons.format_italic, 'Italic', cur.italic, (s) => s.copy(italic: !s.italic)),
@@ -444,8 +661,6 @@ class _EditorPageState extends State<EditorPage> with WidgetsBindingObserver {
 
   /// Icon-only bottom bar (all icons fit on screen, no scrolling).
   Widget bottomBar(TS cur) {
-    final fontList = {...fonts, cur.font}.toList();
-    final sizeList = <double>{...sizes, cur.size}.toList()..sort();
     final primary = Theme.of(context).colorScheme.primary;
     return Material(
       elevation: 8,
@@ -462,28 +677,6 @@ class _EditorPageState extends State<EditorPage> with WidgetsBindingObserver {
                 tooltip: 'Redo',
                 icon: const Icon(Icons.redo),
                 onPressed: ctl.canRedo ? ctl.redo : null),
-            PopupMenuButton<String>(
-              tooltip: 'Font',
-              icon: const Icon(Icons.font_download_outlined),
-              onSelected: (f) => ctl.apply((s) => s.copy(font: f)),
-              itemBuilder: (_) => [
-                for (final f in fontList)
-                  CheckedPopupMenuItem<String>(
-                      value: f,
-                      checked: f == cur.font,
-                      child: Text(f, style: TextStyle(fontFamily: f))),
-              ],
-            ),
-            PopupMenuButton<double>(
-              tooltip: 'Size',
-              icon: const Icon(Icons.format_size),
-              onSelected: (z) => ctl.apply((s) => s.copy(size: z)),
-              itemBuilder: (_) => [
-                for (final z in sizeList)
-                  CheckedPopupMenuItem<double>(
-                      value: z, checked: z == cur.size, child: Text(fmt(z))),
-              ],
-            ),
             IconButton(
               tooltip: 'Text style',
               icon: Icon(Icons.text_format, color: panel == 'format' ? primary : null),
@@ -500,6 +693,26 @@ class _EditorPageState extends State<EditorPage> with WidgetsBindingObserver {
                     border: Border.all(color: panel == 'color' ? primary : Colors.grey, width: 2)),
               ),
               onPressed: () => setState(() => panel = panel == 'color' ? '' : 'color'),
+            ),
+            PopupMenuButton<String>(
+              tooltip: 'Insert',
+              icon: const Icon(Icons.add_photo_alternate_outlined),
+              onSelected: (v) {
+                if (v == 'gallery') addPhotos(ImageSource.gallery);
+                if (v == 'camera') addPhotos(ImageSource.camera);
+                if (v == 'draw') drawNote();
+              },
+              itemBuilder: (_) => const [
+                PopupMenuItem(
+                    value: 'gallery',
+                    child: Row(children: [Icon(Icons.photo_library_outlined), SizedBox(width: 12), Text('Photo from gallery')])),
+                PopupMenuItem(
+                    value: 'camera',
+                    child: Row(children: [Icon(Icons.photo_camera_outlined), SizedBox(width: 12), Text('Take a photo')])),
+                PopupMenuItem(
+                    value: 'draw',
+                    child: Row(children: [Icon(Icons.draw_outlined), SizedBox(width: 12), Text('Handwriting / drawing')])),
+              ],
             ),
             PopupMenuButton<String>(
               tooltip: 'List',
@@ -548,6 +761,7 @@ class _EditorPageState extends State<EditorPage> with WidgetsBindingObserver {
             PopupMenuButton<String>(
               onSelected: onMenu,
               itemBuilder: (_) => [
+                const PopupMenuItem(value: 'find', child: Text('Find in note')),
                 const PopupMenuItem(value: 'export', child: Text('Export…')),
                 PopupMenuItem(value: 'pin', child: Text(n.pinned ? 'Unpin' : 'Pin to top')),
                 const PopupMenuItem(value: 'samsung', child: Text('Send to Samsung Notes')),
@@ -559,11 +773,14 @@ class _EditorPageState extends State<EditorPage> with WidgetsBindingObserver {
           ],
         ),
         body: Column(children: [
+          if (finding) findBar(),
+          if (widget.note.images.isNotEmpty) attachments(),
           Expanded(
             child: Padding(
               padding: const EdgeInsets.all(12),
               child: TextField(
                   controller: ctl,
+                  focusNode: editorFocus,
                   inputFormatters: [ListContinue()],
                   cursorColor: (n.bg != 0 && Color(n.bg).computeLuminance() >= 0.4)
                       ? Colors.black87

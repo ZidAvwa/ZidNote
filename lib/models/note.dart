@@ -110,10 +110,12 @@ class Note {
   int modified; // ms since epoch
   int deletedAt; // 0 = normal note, else ms when moved to trash
   List<Run> runs;
+  List<String> images; // photo / drawing file names (see storage.dart)
 
   Note(this.id, this.title, this.runs,
-      [this.group = '', this.pinned = false, this.bg = 0, int? modified, this.deletedAt = 0])
-      : modified = modified ?? (int.tryParse(id) ?? 0);
+      [this.group = '', this.pinned = false, this.bg = 0, int? modified, this.deletedAt = 0, List<String>? images])
+      : modified = modified ?? (int.tryParse(id) ?? 0),
+        images = images ?? <String>[];
 
   int get created => int.tryParse(id) ?? 0; // the id is the creation time
   String get plain => runs.map((r) => r.t).join();
@@ -126,6 +128,7 @@ class Note {
         'bg': bg,
         'modified': modified,
         'deletedAt': deletedAt,
+        'images': images,
         'runs': runs.map((r) => r.toJson()).toList()
       };
 
@@ -137,5 +140,6 @@ class Note {
       j['pinned'] ?? false,
       j['bg'] ?? 0,
       j['modified'],
-      j['deletedAt'] ?? 0);
+      j['deletedAt'] ?? 0,
+      List<String>.from((j['images'] as List?) ?? const []));
 }

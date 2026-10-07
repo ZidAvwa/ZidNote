@@ -128,6 +128,15 @@ class RichCtl extends TextEditingController {
       _off = s.baseOffset;
       final i = s.baseOffset > 0 ? s.baseOffset - 1 : 0;
       if (i < chars.length) pen = chars[i];
+      // Tapping a checkbox (the cursor lands on the ☐ / ☑ glyph) toggles it.
+      final o = s.baseOffset;
+      final a = o == 0 ? 0 : text.lastIndexOf('\n', o - 1) + 1;
+      if (a + 1 < text.length &&
+          (text[a] == '☐' || text[a] == '☑') &&
+          text[a + 1] == ' ' &&
+          (o == a || o == a + 1)) {
+        Future.microtask(() => _toggleAt(a));
+      }
     }
   }
 
@@ -147,6 +156,37 @@ class RichCtl extends TextEditingController {
     chars.removeRange(p, _old.length - s);
     chars.insertAll(p, List.filled(n.length - s - p, pen));
     _old = n;
+  }
+
+  // ---- find in note ----
+  String find = '';
+  int findIndex = 0;
+
+  List<int> _matches() {
+    if (find.isEmpty) return const [];
+    final q = find.toLowerCase(), t = text.toLowerCase();
+    final out = <int>[];
+    for (int i = t.indexOf(q); i >= 0; i = t.indexOf(q, i + q.length)) {
+      out.add(i);
+    }
+    return out;
+  }
+
+  int get matchCount => _matches().length;
+
+  void setFind(String q) {
+    find = q;
+    findIndex = 0;
+    notifyListeners();
+  }
+
+  /// Moves to the next (+1) / previous (-1) match and selects it.
+  void findStep(int d) {
+    final m = _matches();
+    if (m.isEmpty) return;
+    findIndex = (findIndex + d) % m.length;
+    final s = m[findIndex];
+    selection = TextSelection(baseOffset: s, extentOffset: (s + find.length).clamp(0, text.length));
   }
 
   /// Style shown in the toolbar: of the selection, or of the typing pen.
@@ -237,19 +277,25 @@ class RichCtl extends TextEditingController {
     });
   }
 
-  /// Flips ☐ / ☑ on the line that has the cursor.
-  void toggleCheck() {
+  void _toggleAt(int a) {
     final t = text;
-    final i = selection.isValid ? selection.start : 0;
-    final a = i == 0 ? 0 : t.lastIndexOf('\n', i - 1) + 1;
     if (a + 1 >= t.length) return;
     final ch = t[a];
     if ((ch != '☐' && ch != '☑') || t[a + 1] != ' ') return;
     final newT = t.replaceRange(a, a + 1, ch == '☐' ? '☑' : '☐');
+    final ns = TextSelection.collapsed(offset: a + 2);
     _discrete(() {
       _old = newT; // same length and style, so `chars` stays valid
-      value = value.copyWith(text: newT);
+      _off = a + 2;
+      value = TextEditingValue(text: newT, selection: ns);
     });
+  }
+
+  /// Flips ☐ / ☑ on the line that has the cursor.
+  void toggleCheck() {
+    final t = text;
+    final i = selection.isValid ? selection.start : 0;
+    _toggleAt(i == 0 ? 0 : t.lastIndexOf('\n', i - 1) + 1);
   }
 
   List<Run> runs() {
@@ -269,7 +315,30 @@ class RichCtl extends TextEditingController {
   TextSpan buildTextSpan(
       {required BuildContext context, TextStyle? style, required bool withComposing}) {
     final ink = autoInk(context, bg);
-    return TextSpan(children: [for (final r in runs()) TextSpan(text: r.t, style: r.s.styleOn(ink))]);
+    final ms = _matches();
+    final spans = <TextSpan>[];
+    int pos = 0;
+    for (final r in runs()) {
+      final base = r.s.styleOn(ink);
+      final rs = pos, re = pos + r.t.length;
+      pos = re;
+      int cur = rs;
+      for (int k = 0; k < ms.length; k++) {
+        final a = ms[k] > rs ? ms[k] : rs;
+        final e = ms[k] + find.length < re ? ms[k] + find.length : re;
+        if (a >= e) continue;
+        if (a > cur) spans.add(TextSpan(text: text.substring(cur, a), style: base));
+        spans.add(TextSpan(
+            text: text.substring(a, e),
+            style: base.copyWith(
+                color: Colors.black,
+                backgroundColor:
+                    k == findIndex ? const Color(0xFFFFB74D) : const Color(0xFFFFF176))));
+        cur = e;
+      }
+      if (cur < re) spans.add(TextSpan(text: text.substring(cur, re), style: base));
+    }
+    return TextSpan(children: spans);
   }
 }
 
